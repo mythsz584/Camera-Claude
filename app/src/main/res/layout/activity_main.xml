@@ -90,6 +90,31 @@
                 android:textSize="96sp"
                 android:visibility="gone" />
 
+            <TextView
+                android:id="@+id/zoomText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|end"
+                android:layout_marginEnd="52dp"
+                android:layout_marginTop="16dp"
+                android:background="#80000000"
+                android:paddingBottom="2dp"
+                android:paddingEnd="8dp"
+                android:paddingStart="8dp"
+                android:paddingTop="2dp"
+                android:textColor="#FFFFC107"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <!-- Barra de zoom -->
+            <com.fotoia.app.ZoomBar
+                android:id="@+id/zoomBar"
+                android:layout_width="48dp"
+                android:layout_height="match_parent"
+                android:layout_gravity="end"
+                android:layout_marginBottom="232dp"
+                android:layout_marginTop="8dp" />
+
             <!-- Noite e mais opcoes -->
             <LinearLayout
                 android:layout_width="wrap_content"

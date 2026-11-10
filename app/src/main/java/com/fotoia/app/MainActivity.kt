@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
@@ -71,6 +72,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnMore: ImageButton
     private lateinit var btnZoomA: TextView
     private lateinit var btnZoomB: TextView
+    private lateinit var zoomBar: ZoomBar
+    private lateinit var zoomText: TextView
     private lateinit var btnGallery: ImageView
     private lateinit var btnShutter: View
     private lateinit var btnFlip: ImageButton
@@ -106,6 +109,10 @@ class MainActivity : AppCompatActivity() {
     private var gridOn = true
     private var timerSec = 0
     private var inputSide = 896
+
+    // Zoom total pedido (camera x digital) e a parte digital, feita por recorte
+    private var totalZoom = 1f
+    private var digitalZoom = 1f
 
     // Trabalho em andamento
     private var job: Job? = null
@@ -148,6 +155,8 @@ class MainActivity : AppCompatActivity() {
         btnMore = findViewById(R.id.btnMore)
         btnZoomA = findViewById(R.id.btnZoomA)
         btnZoomB = findViewById(R.id.btnZoomB)
+        zoomBar = findViewById(R.id.zoomBar)
+        zoomText = findViewById(R.id.zoomText)
         btnGallery = findViewById(R.id.btnGallery)
         btnShutter = findViewById(R.id.btnShutter)
         btnFlip = findViewById(R.id.btnFlip)
@@ -162,6 +171,27 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         progressBar = findViewById(R.id.progressBar)
         btnSave = findViewById(R.id.btnSave)
+
+        // TextureView permite ampliar a imagem da camera para o zoom digital.
+        previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        zoomBar.onZoomChanged = { value ->
+            totalZoom = value
+            applyZoom()
+        }
+        val pinch = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    totalZoom *= detector.scaleFactor
+                    applyZoom()
+                    return true
+                }
+            }
+        )
+        previewView.setOnTouchListener { _, event ->
+            pinch.onTouchEvent(event)
+            true
+        }
 
         btnGallery.outlineProvider = ViewOutlineProvider.BACKGROUND
         btnGallery.clipToOutline = true
@@ -277,6 +307,7 @@ class MainActivity : AppCompatActivity() {
             provider.unbindAll()
             imageCapture = null
             videoCapture = null
+            totalZoom = 1f
             val preview = Preview.Builder().build()
             preview.setSurfaceProvider(previewView.surfaceProvider)
 
@@ -311,8 +342,8 @@ class MainActivity : AppCompatActivity() {
             toast(R.string.camera_error)
         }
         // Os limites de zoom podem chegar um instante depois de ligar a camera.
-        refreshUi()
-        previewView.postDelayed({ refreshUi() }, 600)
+        applyZoom()
+        previewView.postDelayed({ applyZoom() }, 600)
     }
 
     private fun setMode(newMode: Mode) {
@@ -383,9 +414,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun setZoom(first: Boolean) {
         val levels = zoomLevels()
-        val ratio = if (first) levels.first else levels.second
-        camera?.cameraControl?.setZoomRatio(ratio)
-        previewView.postDelayed({ refreshUi() }, 150)
+        totalZoom = if (first) levels.first else levels.second
+        applyZoom()
+    }
+
+    /**
+     * Aplica o zoom total: primeiro o zoom da propria camera, ate o limite dela;
+     * o que passar disso e zoom digital (amplia a previa e recorta o centro da foto).
+     */
+    private fun applyZoom() {
+        val state = camera?.cameraInfo?.zoomState?.value
+        val minRatio = state?.minZoomRatio ?: 1f
+        val maxRatio = max(state?.maxZoomRatio ?: 1f, minRatio)
+        // No video nao ha recorte, entao o limite e o da camera.
+        val limit = if (mode == Mode.VIDEO) maxRatio else max(MAX_ZOOM, maxRatio)
+        totalZoom = totalZoom.coerceIn(minRatio, limit)
+        val cameraZoom = min(totalZoom, maxRatio)
+        camera?.cameraControl?.setZoomRatio(cameraZoom)
+        digitalZoom = max(1f, totalZoom / cameraZoom)
+        previewView.scaleX = digitalZoom
+        previewView.scaleY = digitalZoom
+        zoomBar.setRange(minRatio, limit)
+        zoomBar.setZoom(totalZoom)
+        zoomText.text = if (totalZoom < 10f) {
+            String.format(Locale.US, "%.1fx", totalZoom)
+        } else {
+            String.format(Locale.US, "%.0fx", totalZoom)
+        }
+        refreshUi()
     }
 
     private fun zoomLabel(ratio: Float): String {
@@ -497,6 +553,7 @@ class MainActivity : AppCompatActivity() {
         previewView.animate().alpha(0.3f).setDuration(80).withEndAction {
             previewView.animate().alpha(1f).setDuration(120).start()
         }.start()
+        val crop = digitalZoom
         val file = File(cacheDir, "captura.jpg")
         val options = ImageCapture.OutputFileOptions.Builder(file).build()
         capture.takePicture(
@@ -505,7 +562,7 @@ class MainActivity : AppCompatActivity() {
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     capturing = false
-                    if (aiOn) process(file) else saveOriginal(file)
+                    if (aiOn) process(file, crop) else saveOriginal(file, crop)
                 }
 
                 override fun onError(exc: ImageCaptureException) {
@@ -517,7 +574,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Com a IA desligada a foto vai direto para a galeria, sem processamento. */
-    private fun saveOriginal(file: File) {
+    private fun saveOriginal(file: File, crop: Float) {
         lifecycleScope.launch {
             val thumb = withContext(Dispatchers.IO) {
                 try {
@@ -525,11 +582,17 @@ class MainActivity : AppCompatActivity() {
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI, imageValues()
                     ) ?: return@withContext null
                     val written = contentResolver.openOutputStream(uri)?.use { out ->
-                        file.inputStream().use { it.copyTo(out) }
-                        true
+                        if (crop > 1.01f) {
+                            // Zoom digital: salva so o centro da foto.
+                            ImageLoader.load(file, 100000, crop).bitmap
+                                .compress(Bitmap.CompressFormat.JPEG, 95, out)
+                        } else {
+                            file.inputStream().use { it.copyTo(out) }
+                            true
+                        }
                     } ?: false
                     finishPending(uri)
-                    if (written) ImageLoader.load(file, 256).bitmap else null
+                    if (written) ImageLoader.load(file, 256, crop).bitmap else null
                 } catch (e: Exception) {
                     null
                 }
@@ -617,7 +680,7 @@ class MainActivity : AppCompatActivity() {
         gridOverlay.visibility = if (gridOn) View.VISIBLE else View.GONE
 
         val levels = zoomLevels()
-        val currentZoom = camera?.cameraInfo?.zoomState?.value?.zoomRatio ?: 1f
+        val currentZoom = totalZoom
         btnZoomA.text = zoomLabel(levels.first)
         btnZoomB.text = zoomLabel(levels.second)
         val firstSelected = kotlin.math.abs(currentZoom - levels.first) <=
@@ -667,13 +730,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun process(file: File) {
+    private fun process(file: File, crop: Float = 1f) {
         val side = inputSide
         showResult()
         job?.cancel()
         job = lifecycleScope.launch {
             try {
-                val loaded = withContext(Dispatchers.Default) { ImageLoader.load(file, side) }
+                val loaded = withContext(Dispatchers.Default) { ImageLoader.load(file, side, crop) }
                 originalBmp = loaded.bitmap
                 imageView.setImageBitmap(loaded.bitmap)
                 statusText.text = getString(R.string.enhancing, 0)
@@ -799,6 +862,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    companion object {
+        /** Zoom maximo oferecido na barra (camera x recorte digital). */
+        const val MAX_ZOOM = 100f
+    }
 
     private fun toast(resId: Int) {
         Toast.makeText(this, resId, Toast.LENGTH_SHORT).show()
