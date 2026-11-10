@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Foto IA</string>
+    <string name="gallery">Galeria</string>
+    <string name="flip">Virar</string>
+    <string name="q_fast">Rápido</string>
+    <string name="q_balanced">Equilibrado</string>
+    <string name="q_max">Máximo</string>
+    <string name="save">Salvar</string>
+    <string name="discard">Descartar</string>
+    <string name="shutter">Tirar foto</string>
+    <string name="preparing">Preparando a foto…</string>
+    <string name="enhancing">Melhorando com IA… %1$d%%</string>
+    <string name="done_hint">Pronto! Segure a foto para ver o antes</string>
+    <string name="saved">Foto salva em Imagens/FotoIA</string>
+    <string name="save_error">Não foi possível salvar a foto</string>
+    <string name="camera_denied">Sem permissão da câmera. Você ainda pode escolher fotos da galeria.</string>
+    <string name="camera_error">Não foi possível abrir a câmera</string>
+    <string name="capture_error">Não foi possível tirar a foto</string>
+    <string name="enhance_error">Erro ao melhorar a foto: %1$s</string>
+    <string name="photo_desc">Foto</string>
+</resources>
