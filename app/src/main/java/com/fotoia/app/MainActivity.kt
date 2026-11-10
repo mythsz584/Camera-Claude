@@ -14,6 +14,7 @@ import android.provider.MediaStore
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.ImageButton
@@ -28,6 +29,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.PopupMenu
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -54,6 +56,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -72,8 +76,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnMore: ImageButton
     private lateinit var btnZoomA: TextView
     private lateinit var btnZoomB: TextView
-    private lateinit var zoomBar: ZoomBar
+    private lateinit var zoomBar: SliderBar
     private lateinit var zoomText: TextView
+    private lateinit var exposureBar: SliderBar
+    private lateinit var exposureText: TextView
+    private lateinit var previewContainer: View
+    private lateinit var focusRing: View
     private lateinit var btnGallery: ImageView
     private lateinit var btnShutter: View
     private lateinit var btnFlip: ImageButton
@@ -109,6 +117,18 @@ class MainActivity : AppCompatActivity() {
     private var gridOn = true
     private var timerSec = 0
     private var inputSide = 896
+    private var enhanceLevel = 2   // 0 = natural, 1 = forte, 2 = extremo
+
+    // Luz (barra da esquerda): posicao de -1 a +1 e o valor em EV que ela representa
+    private var exposureFraction = 0f
+    private var exposureEv = 0f
+    private var exposureIndex = 0
+    private var exposureHintShown = false
+
+    // Toque para focar
+    private var tapOk = false
+    private var tapX = 0f
+    private var tapY = 0f
 
     // Zoom total pedido (camera x digital) e a parte digital, feita por recorte
     private var totalZoom = 1f
@@ -118,7 +138,8 @@ class MainActivity : AppCompatActivity() {
     private var job: Job? = null
     private var countdownJob: Job? = null
     private var originalBmp: Bitmap? = null
-    private var enhancedBmp: Bitmap? = null
+    private var enhancedBmp: Bitmap? = null      // resolucao total, para salvar
+    private var enhancedPreview: Bitmap? = null  // copia menor, para mostrar na tela
     private var capturing = false
 
     private val enhancer by lazy { Enhancer(applicationContext) }
@@ -157,6 +178,10 @@ class MainActivity : AppCompatActivity() {
         btnZoomB = findViewById(R.id.btnZoomB)
         zoomBar = findViewById(R.id.zoomBar)
         zoomText = findViewById(R.id.zoomText)
+        exposureBar = findViewById(R.id.exposureBar)
+        exposureText = findViewById(R.id.exposureText)
+        previewContainer = findViewById(R.id.previewContainer)
+        focusRing = findViewById(R.id.focusRing)
         btnGallery = findViewById(R.id.btnGallery)
         btnShutter = findViewById(R.id.btnShutter)
         btnFlip = findViewById(R.id.btnFlip)
@@ -174,10 +199,23 @@ class MainActivity : AppCompatActivity() {
 
         // TextureView permite ampliar a imagem da camera para o zoom digital.
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-        zoomBar.onZoomChanged = { value ->
+        zoomBar.onValueChanged = { value ->
             totalZoom = value
             applyZoom()
         }
+        zoomText.setOnClickListener {
+            totalZoom = 1f
+            applyZoom()
+        }
+        exposureBar.alignLeft = true
+        exposureBar.logScale = false
+        exposureBar.centerMark = true
+        exposureBar.setRange(-1f, 1f)
+        exposureBar.setValue(0f)
+        exposureBar.onValueChanged = { value -> setExposure(value) }
+        exposureText.setOnClickListener { resetExposure() }
+        updateExposureLabel()
+
         val pinch = ScaleGestureDetector(
             this,
             object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -188,8 +226,27 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
         previewView.setOnTouchListener { _, event ->
             pinch.onTouchEvent(event)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    tapOk = true
+                    tapX = event.x
+                    tapY = event.y
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> tapOk = false
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(event.x - tapX) > slop || abs(event.y - tapY) > slop) tapOk = false
+                }
+                MotionEvent.ACTION_UP -> {
+                    // Toque simples: foca e mede a luz naquele ponto.
+                    if (tapOk && event.eventTime - event.downTime < 500) {
+                        focusAt(event.x, event.y, event.rawX, event.rawY)
+                    }
+                    tapOk = false
+                }
+            }
             true
         }
 
@@ -229,7 +286,7 @@ class MainActivity : AppCompatActivity() {
         // Segurar a foto mostra o "antes"; soltar mostra o "depois".
         imageView.setOnTouchListener { _, event ->
             val before = originalBmp
-            val after = enhancedBmp
+            val after = enhancedPreview
             if (before != null && after != null) {
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> imageView.setImageBitmap(before)
@@ -246,6 +303,19 @@ class MainActivity : AppCompatActivity() {
             startCamera()
         } else {
             cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (camera != null) {
+            totalZoom = 1f
+            resetExposure()
+            applyZoom()
+            previewView.postDelayed({
+                applyZoom()
+                applyExposureIndex()
+            }, 700)
         }
     }
 
@@ -308,6 +378,10 @@ class MainActivity : AppCompatActivity() {
             imageCapture = null
             videoCapture = null
             totalZoom = 1f
+            exposureFraction = 0f
+            exposureEv = 0f
+            exposureIndex = 0
+            exposureHintShown = false
             val preview = Preview.Builder().build()
             preview.setSurfaceProvider(previewView.surfaceProvider)
 
@@ -342,6 +416,8 @@ class MainActivity : AppCompatActivity() {
             toast(R.string.camera_error)
         }
         // Os limites de zoom podem chegar um instante depois de ligar a camera.
+        exposureBar.setValue(0f)
+        updateExposureLabel()
         applyZoom()
         previewView.postDelayed({ applyZoom() }, 600)
     }
@@ -435,7 +511,7 @@ class MainActivity : AppCompatActivity() {
         previewView.scaleX = digitalZoom
         previewView.scaleY = digitalZoom
         zoomBar.setRange(minRatio, limit)
-        zoomBar.setZoom(totalZoom)
+        zoomBar.setValue(totalZoom)
         zoomText.text = if (totalZoom < 10f) {
             String.format(Locale.US, "%.1fx", totalZoom)
         } else {
@@ -452,26 +528,122 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ------------------------------------------------------------ luz e foco
+
+    /** Barra da esquerda: [fraction] vai de -1 (mais escuro) a +1 (mais claro). */
+    private fun setExposure(fraction: Float) {
+        exposureFraction = fraction.coerceIn(-1f, 1f)
+        val state = camera?.cameraInfo?.exposureState
+        if (state != null && state.isExposureCompensationSupported) {
+            val range = state.exposureCompensationRange
+            val index = if (exposureFraction >= 0f) {
+                Math.round(exposureFraction * range.upper)
+            } else {
+                Math.round(-exposureFraction * range.lower)
+            }
+            exposureEv = index * state.exposureCompensationStep.toFloat()
+            if (index != exposureIndex) {
+                exposureIndex = index
+                applyExposureIndex()
+            }
+        } else {
+            // A camera nao aceita o ajuste: o valor vale so para o realce da IA.
+            exposureEv = exposureFraction * 2f
+            exposureIndex = 0
+            if (!exposureHintShown && exposureFraction != 0f && camera != null) {
+                exposureHintShown = true
+                toast(R.string.exposure_ai_only)
+            }
+        }
+        updateExposureLabel()
+    }
+
+    private fun applyExposureIndex() {
+        val cam = camera ?: return
+        try {
+            if (cam.cameraInfo.exposureState.isExposureCompensationSupported) {
+                cam.cameraControl.setExposureCompensationIndex(exposureIndex)
+            }
+        } catch (e: Exception) {
+            // camera fechada ou ajuste recusado: fica como esta
+        }
+    }
+
+    private fun resetExposure() {
+        exposureBar.setValue(0f)
+        setExposure(0f)
+    }
+
+    private fun updateExposureLabel() {
+        exposureText.text = String.format(Locale.US, "☀ %+.1f", exposureEv)
+    }
+
+    private fun focusAt(x: Float, y: Float, rawX: Float, rawY: Float) {
+        val cam = camera ?: return
+        try {
+            val point = previewView.meteringPointFactory.createPoint(x, y)
+            val action = FocusMeteringAction.Builder(point)
+                .setAutoCancelDuration(4, TimeUnit.SECONDS)
+                .build()
+            cam.cameraControl.startFocusAndMetering(action)
+        } catch (e: Exception) {
+            return
+        }
+        val origin = IntArray(2)
+        previewContainer.getLocationOnScreen(origin)
+        focusRing.animate().cancel()
+        focusRing.x = rawX - origin[0] - focusRing.width / 2f
+        focusRing.y = rawY - origin[1] - focusRing.height / 2f
+        focusRing.alpha = 1f
+        focusRing.scaleX = 1.4f
+        focusRing.scaleY = 1.4f
+        focusRing.visibility = View.VISIBLE
+        focusRing.animate().setStartDelay(0).scaleX(1f).scaleY(1f).setDuration(200).withEndAction {
+            focusRing.animate().setStartDelay(700).alpha(0f).setDuration(300).start()
+        }.start()
+    }
+
     // ------------------------------------------------------------- menus
 
     private fun showQualityMenu(anchor: View) {
         val popup = PopupMenu(this, anchor)
-        val options = listOf(
-            512 to getString(R.string.q_fast),
-            896 to getString(R.string.q_balanced),
-            1280 to getString(R.string.q_max)
+        val sizes = listOf(
+            512 to R.string.q_fast,
+            896 to R.string.q_balanced,
+            1280 to R.string.q_max,
+            1792 to R.string.q_ultra
         )
-        options.forEachIndexed { index, option ->
-            val mark = if (option.first == inputSide) "✓ " else ""
-            popup.menu.add(0, index, index, mark + option.second)
+        val levels = listOf(R.string.e_natural, R.string.e_strong, R.string.e_extreme)
+
+        popup.menu.add(0, 0, 0, R.string.menu_size).isEnabled = false
+        sizes.forEachIndexed { index, size ->
+            popup.menu.add(0, 100 + index, 1 + index, mark(size.first == inputSide) + getString(size.second))
+        }
+        popup.menu.add(0, 1, 10, R.string.menu_enhance).isEnabled = false
+        levels.forEachIndexed { index, name ->
+            popup.menu.add(0, 200 + index, 11 + index, mark(index == enhanceLevel) + getString(name))
         }
         popup.setOnMenuItemClickListener { item ->
-            val chosen = options[item.itemId]
-            inputSide = chosen.first
-            toast(getString(R.string.quality_set, chosen.second))
+            when (item.itemId) {
+                in 100..199 -> {
+                    val chosen = sizes[item.itemId - 100]
+                    inputSide = chosen.first
+                    toast(getString(R.string.quality_set, getString(chosen.second)))
+                }
+                in 200..299 -> {
+                    enhanceLevel = item.itemId - 200
+                    toast(getString(R.string.enhance_set, getString(levels[enhanceLevel])))
+                }
+            }
             true
         }
         popup.show()
+    }
+
+    private fun currentLevel(): Enhancer.Level = when (enhanceLevel) {
+        0 -> Enhancer.NATURAL
+        1 -> Enhancer.STRONG
+        else -> Enhancer.EXTREME
     }
 
     private fun showOptionsMenu(anchor: View) {
@@ -554,6 +726,7 @@ class MainActivity : AppCompatActivity() {
             previewView.animate().alpha(1f).setDuration(120).start()
         }.start()
         val crop = digitalZoom
+        val ev = exposureEv
         val file = File(cacheDir, "captura.jpg")
         val options = ImageCapture.OutputFileOptions.Builder(file).build()
         capture.takePicture(
@@ -562,7 +735,7 @@ class MainActivity : AppCompatActivity() {
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     capturing = false
-                    if (aiOn) process(file, crop) else saveOriginal(file, crop)
+                    if (aiOn) process(file, crop, ev) else saveOriginal(file, crop)
                 }
 
                 override fun onError(exc: ImageCaptureException) {
@@ -730,8 +903,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun process(file: File, crop: Float = 1f) {
+    /**
+     * Melhora a foto com a IA. [crop] e o zoom digital (recorte do centro) e [ev] o ajuste
+     * manual de luz usado no disparo; fotos da galeria usam 0 (so o ajuste automatico).
+     */
+    private fun process(file: File, crop: Float = 1f, ev: Float = 0f) {
         val side = inputSide
+        val level = currentLevel()
         showResult()
         job?.cancel()
         job = lifecycleScope.launch {
@@ -742,7 +920,8 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = getString(R.string.enhancing, 0)
 
                 val result = withContext(Dispatchers.Default) {
-                    var out = enhancer.enhance(loaded.bitmap) { done, total ->
+                    val params = enhancer.analyze(loaded.bitmap, level, ev)
+                    enhancer.enhance(loaded.bitmap, params) { done, total ->
                         val pct = done * 100 / max(1, total)
                         runOnUiThread {
                             if (job?.isActive == true) {
@@ -751,31 +930,35 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                    // Nao salva maior do que a foto original da camera.
-                    val origLong = max(loaded.originalWidth, loaded.originalHeight)
-                    val outLong = max(out.width, out.height)
-                    val inLong = max(loaded.bitmap.width, loaded.bitmap.height)
-                    if (outLong > origLong && origLong > inLong) {
-                        val scale = origLong.toFloat() / outLong
-                        val w = max(1, Math.round(out.width * scale))
-                        val h = max(1, Math.round(out.height * scale))
-                        out = Bitmap.createScaledBitmap(out, w, h, true)
-                    }
-                    out
                 }
+                // Fotos muito grandes nao podem ser desenhadas inteiras na tela: mostra uma copia menor.
+                val preview = withContext(Dispatchers.Default) { previewOf(result) }
                 enhancedBmp = result
-                imageView.setImageBitmap(result)
+                enhancedPreview = preview
+                imageView.setImageBitmap(preview)
                 progressBar.visibility = View.GONE
                 statusText.setText(R.string.done_hint)
                 btnSave.isEnabled = true
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: OutOfMemoryError) {
+                toast(R.string.out_of_memory)
+                closeResult()
             } catch (e: Throwable) {
                 showError(e.message ?: e.javaClass.simpleName)
             } finally {
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
         }
+    }
+
+    private fun previewOf(bmp: Bitmap): Bitmap {
+        val longSide = max(bmp.width, bmp.height)
+        if (longSide <= MAX_PREVIEW_SIDE) return bmp
+        val scale = MAX_PREVIEW_SIDE.toFloat() / longSide
+        val w = max(1, Math.round(bmp.width * scale))
+        val h = max(1, Math.round(bmp.height * scale))
+        return Bitmap.createScaledBitmap(bmp, w, h, true)
     }
 
     private fun showError(detail: String) {
@@ -786,6 +969,7 @@ class MainActivity : AppCompatActivity() {
     private fun showResult() {
         originalBmp = null
         enhancedBmp = null
+        enhancedPreview = null
         imageView.setImageDrawable(null)
         progressBar.progress = 0
         progressBar.visibility = View.VISIBLE
@@ -803,6 +987,7 @@ class MainActivity : AppCompatActivity() {
         imageView.setImageDrawable(null)
         originalBmp = null
         enhancedBmp = null
+        enhancedPreview = null
         resultLayer.visibility = View.GONE
         cameraLayer.visibility = View.VISIBLE
         backCallback.isEnabled = false
@@ -866,6 +1051,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         /** Zoom maximo oferecido na barra (camera x recorte digital). */
         const val MAX_ZOOM = 100f
+
+        /** Lado maior da copia mostrada na tela de resultado. */
+        const val MAX_PREVIEW_SIDE = 2400
     }
 
     private fun toast(resId: Int) {

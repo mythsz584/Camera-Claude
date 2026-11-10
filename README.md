@@ -1,29 +1,33 @@
 # Foto IA
 
 App Android de câmera que melhora as fotos com IA **no próprio celular, sem internet**.
-Usa o modelo Real-ESRGAN (`realesr-general-x4v3`) com o ONNX Runtime: reduz ruído,
-recupera nitidez e amplia a imagem.
+
+O modelo (`app/src/main/assets/fotoia-x4.onnx`, rodando com o ONNX Runtime) faz duas coisas:
+
+1. **Super-resolução 4x** com Real-ESRGAN (`realesr-general-x4v3`): reduz ruído e recupera detalhes.
+2. **Realce**: níveis, luz (gama), contraste, saturação, clareza e nitidez, calculados para cada foto.
+
+## Recursos
+
+- Flash, grade, temporizador, modo noite, retrato e vídeo.
+- Barra de **zoom** à direita (até 100x: zoom da lente + recorte digital) e gesto de pinça.
+- Barra de **luz** à esquerda (exposição da câmera); tocar no número volta para zero.
+- Toque na imagem para focar.
+- Tamanho da foto com IA: Rápido, Equilibrado, Máximo ou Ultra.
+- Intensidade do realce: Natural, Forte ou Extremo.
+- Depois de processar, segure a foto para comparar com o "antes". Salva em `Imagens/FotoIA`.
+
+Requer Android 10 ou superior. Quanto maior o tamanho escolhido, mais demora.
 
 ## Como gerar o .apk
 
-1. Envie esta pasta para um repositório no GitHub (branch `main`).
-2. A aba **Actions** compila sozinha (leva alguns minutos).
-3. Baixe o `FotoIA.apk` na aba **Releases** e instale no celular
-   (é preciso permitir "instalar apps de fontes desconhecidas").
+Cada envio para a branch `main` compila sozinho no GitHub (aba **Actions**) e publica
+o `FotoIA.apk` na aba **Releases**.
 
 Para compilar no computador: abra a pasta no Android Studio, ou rode
 `gradle :app:assembleRelease` (Gradle 8.9+, JDK 17).
 
-## Como usar
+## Modelo
 
-- Escolha a qualidade (Rápido / Equilibrado / Máximo), tire a foto ou escolha uma da galeria.
-- Aguarde a barra de progresso; depois segure a foto para comparar com o "antes".
-- **Salvar** grava em `Imagens/FotoIA`.
-
-Quanto maior a qualidade, mais demora (de alguns segundos a mais de um minuto,
-dependendo do aparelho). Requer Android 10 ou superior.
-
-## Créditos
-
-Modelo: [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (licença BSD-3-Clause),
-convertido para ONNX com `tools/export_model.py`.
+`tools/export_model.py` gera o `fotoia-x4.onnx` a partir dos pesos oficiais do
+[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (licença BSD-3-Clause).
