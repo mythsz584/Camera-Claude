@@ -33,6 +33,8 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -87,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnFlip: ImageButton
     private lateinit var recText: TextView
     private lateinit var countdownText: TextView
+    private lateinit var burstText: TextView
     private lateinit var tabPortrait: TextView
     private lateinit var tabPhoto: TextView
     private lateinit var tabVideo: TextView
@@ -118,6 +121,7 @@ class MainActivity : AppCompatActivity() {
     private var timerSec = 0
     private var inputSide = 896
     private var enhanceLevel = 2   // 0 = natural, 1 = forte, 2 = extremo
+    private var highRes = false    // resolucao maxima do sensor (experimental)
 
     // Luz (barra da esquerda): posicao de -1 a +1 e o valor em EV que ela representa
     private var exposureFraction = 0f
@@ -187,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         btnFlip = findViewById(R.id.btnFlip)
         recText = findViewById(R.id.recText)
         countdownText = findViewById(R.id.countdownText)
+        burstText = findViewById(R.id.burstText)
         tabPortrait = findViewById(R.id.tabPortrait)
         tabPhoto = findViewById(R.id.tabPhoto)
         tabVideo = findViewById(R.id.tabVideo)
@@ -398,10 +403,18 @@ class MainActivity : AppCompatActivity() {
                 videoCapture = video
                 provider.bindToLifecycle(this, selector, preview, video)
             } else {
-                val capture = ImageCapture.Builder()
+                val builder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                     .setFlashMode(flashMode)
-                    .build()
+                if (highRes && !extensionActive) {
+                    builder.setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+                            .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                            .build()
+                    )
+                }
+                val capture = builder.build()
                 imageCapture = capture
                 provider.bindToLifecycle(this, selector, preview, capture)
             }
@@ -413,6 +426,12 @@ class MainActivity : AppCompatActivity() {
             camera = null
             imageCapture = null
             videoCapture = null
+            if (highRes && mode != Mode.VIDEO) {
+                highRes = false
+                toast(R.string.hires_unsupported)
+                bindCamera()
+                return
+            }
             toast(R.string.camera_error)
         }
         // Os limites de zoom podem chegar um instante depois de ligar a camera.
@@ -652,12 +671,18 @@ class MainActivity : AppCompatActivity() {
         popup.menu.add(0, 2, 1, mark(timerSec == 0) + getString(R.string.timer_off))
         popup.menu.add(0, 3, 2, mark(timerSec == 3) + getString(R.string.timer_3))
         popup.menu.add(0, 4, 3, mark(timerSec == 10) + getString(R.string.timer_10))
+        popup.menu.add(0, 5, 4, mark(highRes) + getString(R.string.hires_menu))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> gridOn = !gridOn
                 2 -> timerSec = 0
                 3 -> timerSec = 3
                 4 -> timerSec = 10
+                5 -> {
+                    highRes = !highRes
+                    bindCamera()
+                    toast(if (highRes) R.string.hires_on else R.string.hires_off)
+                }
             }
             refreshUi()
             true
@@ -727,6 +752,14 @@ class MainActivity : AppCompatActivity() {
         }.start()
         val crop = digitalZoom
         val ev = exposureEv
+        // Zoom alem da lente: tira varias fotos e combina (menos ruido e tremido).
+        if (aiOn && crop >= BURST_MIN_ZOOM && flashMode == ImageCapture.FLASH_MODE_OFF && !extensionActive) {
+            captureBurst(capture, BURST_FRAMES) { files ->
+                capturing = false
+                if (files.isEmpty()) toast(R.string.capture_error) else process(files, crop, ev)
+            }
+            return
+        }
         val file = File(cacheDir, "captura.jpg")
         val options = ImageCapture.OutputFileOptions.Builder(file).build()
         capture.takePicture(
@@ -735,7 +768,7 @@ class MainActivity : AppCompatActivity() {
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     capturing = false
-                    if (aiOn) process(file, crop, ev) else saveOriginal(file, crop)
+                    if (aiOn) process(listOf(file), crop, ev) else saveOriginal(file, crop)
                 }
 
                 override fun onError(exc: ImageCaptureException) {
@@ -744,6 +777,37 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+    }
+
+    /** Tira [count] fotos seguidas; entrega as que deram certo. */
+    private fun captureBurst(capture: ImageCapture, count: Int, onDone: (List<File>) -> Unit) {
+        val files = ArrayList<File>()
+        burstText.visibility = View.VISIBLE
+        fun finish() {
+            burstText.visibility = View.GONE
+            onDone(files)
+        }
+        fun next(i: Int) {
+            if (i >= count) {
+                finish()
+                return
+            }
+            burstText.text = getString(R.string.burst_progress, i + 1, count)
+            val file = File(cacheDir, "rajada_$i.jpg")
+            capture.takePicture(
+                ImageCapture.OutputFileOptions.Builder(file).build(),
+                ContextCompat.getMainExecutor(this),
+                object : ImageCapture.OnImageSavedCallback {
+                    override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                        files.add(file)
+                        next(i + 1)
+                    }
+
+                    override fun onError(exc: ImageCaptureException) = finish()
+                }
+            )
+        }
+        next(0)
     }
 
     /** Com a IA desligada a foto vai direto para a galeria, sem processamento. */
@@ -899,7 +963,7 @@ class MainActivity : AppCompatActivity() {
                     false
                 }
             }
-            if (ok) process(file) else showError("não consegui abrir a imagem")
+            if (ok) process(listOf(file)) else showError("não consegui abrir a imagem")
         }
     }
 
@@ -907,21 +971,25 @@ class MainActivity : AppCompatActivity() {
      * Melhora a foto com a IA. [crop] e o zoom digital (recorte do centro) e [ev] o ajuste
      * manual de luz usado no disparo; fotos da galeria usam 0 (so o ajuste automatico).
      */
-    private fun process(file: File, crop: Float = 1f, ev: Float = 0f) {
+    private fun process(files: List<File>, crop: Float = 1f, ev: Float = 0f) {
         val side = inputSide
         val level = currentLevel()
         showResult()
         job?.cancel()
         job = lifecycleScope.launch {
             try {
-                val loaded = withContext(Dispatchers.Default) { ImageLoader.load(file, side, crop) }
-                originalBmp = loaded.bitmap
-                imageView.setImageBitmap(loaded.bitmap)
+                if (files.size > 1) statusText.text = getString(R.string.stacking, files.size)
+                val input = withContext(Dispatchers.Default) {
+                    if (files.size > 1) stackBurst(files, side, crop)
+                    else ImageLoader.load(files[0], side, crop).bitmap
+                }
+                originalBmp = input
+                imageView.setImageBitmap(input)
                 statusText.text = getString(R.string.enhancing, 0)
 
                 val result = withContext(Dispatchers.Default) {
-                    val params = enhancer.analyze(loaded.bitmap, level, ev)
-                    enhancer.enhance(loaded.bitmap, params) { done, total ->
+                    val params = enhancer.analyze(input, level, ev)
+                    enhancer.enhance(input, params) { done, total ->
                         val pct = done * 100 / max(1, total)
                         runOnUiThread {
                             if (job?.isActive == true) {
@@ -950,6 +1018,27 @@ class MainActivity : AppCompatActivity() {
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
         }
+    }
+
+    /**
+     * Combina as fotos da rajada. Cada foto e lida com uma margem em volta do recorte do zoom
+     * (espaco para alinhar a mao tremendo); o resultado tem exatamente o enquadramento pedido.
+     */
+    private fun stackBurst(files: List<File>, side: Int, crop: Float): Bitmap {
+        val margin = min(2f, crop)
+        val frameSide = min(Math.round(side * margin), MAX_BURST_SIDE)
+        val result = BurstStacker.stack(
+            files.size,
+            { i ->
+                try {
+                    BitmapFrame(ImageLoader.load(files[i], frameSide, crop / margin).bitmap)
+                } catch (e: Exception) {
+                    null
+                }
+            },
+            1f / margin
+        ) ?: return ImageLoader.load(files[0], side, crop).bitmap
+        return Bitmap.createBitmap(result.pixels, result.width, result.height, Bitmap.Config.ARGB_8888)
     }
 
     private fun previewOf(bmp: Bitmap): Bitmap {
@@ -1054,6 +1143,13 @@ class MainActivity : AppCompatActivity() {
 
         /** Lado maior da copia mostrada na tela de resultado. */
         const val MAX_PREVIEW_SIDE = 2400
+
+        /** Zoom digital (alem da lente) a partir do qual a foto vira uma rajada combinada. */
+        const val BURST_MIN_ZOOM = 1.25f
+        const val BURST_FRAMES = 6
+
+        /** Lado maior de cada foto da rajada (limita o uso de memoria). */
+        const val MAX_BURST_SIDE = 3072
     }
 
     private fun toast(resId: Int) {

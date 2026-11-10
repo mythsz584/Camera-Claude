@@ -83,3 +83,11 @@ object ImageLoader {
         return LoadedPhoto(bmp, origW, origH)
     }
 }
+
+/** Adapta um Bitmap para o [BurstStacker]; libera a memoria ao fechar. */
+class BitmapFrame(private val bmp: Bitmap) : Frame {
+    override val width: Int get() = bmp.width
+    override val height: Int get() = bmp.height
+    override fun readRow(y: Int, out: IntArray) = bmp.getPixels(out, 0, bmp.width, 0, y, bmp.width, 1)
+    override fun close() = bmp.recycle()
+}

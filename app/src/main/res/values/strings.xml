@@ -26,6 +26,12 @@
     <string name="e_extreme">Extremo</string>
     <string name="enhance_set">Realce: %1$s</string>
     <string name="exposure_ai_only">Nesta câmera a luz só muda na foto melhorada pela IA</string>
+    <string name="burst_progress">Segure firme… %1$d/%2$d</string>
+    <string name="stacking">Combinando %1$d fotos…</string>
+    <string name="hires_on">Resolução máxima do sensor: ligada</string>
+    <string name="hires_off">Resolução máxima do sensor: desligada</string>
+    <string name="hires_menu">Resolução máxima do sensor (experimental)</string>
+    <string name="hires_unsupported">Este celular não liberou a resolução máxima para o app</string>
     <string name="out_of_memory">Faltou memória. Tente um tamanho menor.</string>
     <string name="ai_on">Melhoria por IA ligada</string>
     <string name="ai_off">Melhoria por IA desligada: a foto é salva direto</string>
